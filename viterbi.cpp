@@ -248,25 +248,24 @@ double getStateLogPdf(const HMMState &state, const std::vector<double> &xs) {
 	return maxTerm + log(logTerm);
 }
 
-int main() {
-	FullHMM hmm = buildFullModel();
-
+std::vector<std::vector<double> > readObservation(std::string path) {
 	std::vector<std::vector<double> > obs;
-	{
-		std::ifstream f("tst/f/ak/84z3z51.txt");
-		int rows, cols;
-		f >> rows >> cols;
-		for (int i = 0; i < rows; i++) {
-			std::vector<double> row;
-			for (int j = 0; j < cols; j++) {
-				double n;
-				f >> n;
-				row.push_back(n);
-			}
-			obs.push_back(row);
+	std::ifstream f(path);
+	int rows, cols;
+	f >> rows >> cols;
+	for (int i = 0; i < rows; i++) {
+		std::vector<double> row;
+		for (int j = 0; j < cols; j++) {
+			double n;
+			f >> n;
+			row.push_back(n);
 		}
+		obs.push_back(row);
 	}
+	return obs;
+}
 
+std::vector<std::string> recognize(FullHMM &hmm, const std::vector<std::vector<double> > &obs) {
 	int Ns = hmm.states.size();
 	int T = obs.size();
 	std::vector<std::vector<double> > delta, psi;
@@ -311,15 +310,47 @@ int main() {
 	for (int t = T - 2; t >= 0; t--) {
 		int i = psi[t + 1][prev];
 		if (i != prev && i != prev - 1) {
-			result.push_back(hmm.wordStarts[prev]);
+			auto word = hmm.wordStarts[prev];
+			if (word != "")
+				result.push_back(word);
 		}
 		prev = i;
 	}
 
 	std::reverse(result.begin(), result.end());
 
-	for (auto word : result)
-		std::cout << word << std::endl;
-	
+	return result;
+}
+
+int main() {
+	FullHMM hmm = buildFullModel();
+
+	std::ofstream out("result.txt");
+	out << "#!MLF!#" << std::endl;
+
+	std::ifstream f("data/reference.txt");
+	std::string line;
+	std::getline(f, line); // #!MLF!#
+	while (!f.eof()) {
+		std::getline(f, line); // "filename.ext"
+		auto pos = line.rfind(".");
+		if (pos == std::string::npos)
+			continue;
+		std::string filename(line.substr(1, pos - 1));
+		std::cout << filename << std::endl;
+
+		out << '"' << filename << ".rec\"" << std::endl;
+
+		auto obs = readObservation(filename + ".txt");
+		auto result = recognize(hmm, obs);
+
+		for (auto word : result)
+			out << word << std::endl;
+
+		out << '.' << std::endl;
+
+		while (line[0] != '.')
+			std::getline(f, line);
+	}
 	return 0;
 }
