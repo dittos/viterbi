@@ -219,18 +219,33 @@ FullHMM buildFullModel() {
 	return prependSil(makeBigram(words, bigrams), phones["sil"]);
 }
 
-double getStateLogPdf(const HMMState &state, const std::vector<double> &xs) {
-	double maxp = -std::numeric_limits<double>::infinity();
-	for (auto &pdf : state.pdf) {
-		double logp = log(pdf.weight);
-		for (int j = 0; j < N_DIMENSION; j++) {
-			//exp(-(x - mean[i]) ** 2 / (2 * var[i])) / sqrt(2 * pi * var[i])
-			logp += -pow(xs[j] - pdf.mean[j], 2) / (2.0 * pdf.var[j]) - log(2.0 * M_PI * pdf.var[j]) / 2.0;
-		}
-		if (logp > maxp)
-			maxp = logp;
+double getStateLogPdf(const GMM &pdf, const std::vector<double> &xs) {
+	double logp = log(pdf.weight);
+	for (int i = 0; i < N_DIMENSION; i++) {
+		//exp(-(x - mean[i]) ** 2 / (2 * var[i])) / sqrt(2 * pi * var[i])
+		logp += -pow(xs[i] - pdf.mean[i], 2) / (2.0 * pdf.var[i]) - log(2.0 * M_PI * pdf.var[i]) / 2.0;
 	}
-	return maxp;
+	return logp;
+}
+
+double getStateLogPdf(const HMMState &state, const std::vector<double> &xs) {
+	// log(e^100 + e^99)
+	// = log(e^(log e^100) + e^(log e^99))
+	// = log(e^(log e^100) * (e^(log e^100 - log e^100) + e^(log e^99 - log e^100))
+	// = log e^100 + log(1 + e^(log e^99 - log e^100))
+	std::vector<double> terms(N_PDF);
+	double maxTerm = -std::numeric_limits<double>::infinity();
+	for (int i = 0; i < N_PDF; i++) {
+		double term = getStateLogPdf(state.pdf[i], xs);
+		if (term > maxTerm)
+			maxTerm = term;
+		terms[i] = term;
+	}
+	double logTerm = 0.0;
+	for (int i = 0; i < N_PDF; i++) {
+		logTerm += exp(terms[i] - maxTerm);
+	}
+	return maxTerm + log(logTerm);
 }
 
 int main() {
