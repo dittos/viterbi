@@ -29,18 +29,26 @@ struct WordHMM : HMM {
 	std::string name;
 };
 
-struct FullHMM : HMM {
-	std::map<int, std::string> wordStarts;
+struct WordInfo {
+	int enterState;
+	int exitState;
+	std::string word;
 };
 
-void initMatrix(std::vector<std::vector<double>> &m, int rows, int cols) {
-	std::vector<double> row(cols, 0.0);
+struct FullHMM : HMM {
+	std::vector<WordInfo> words;
+};
+
+template <typename T>
+void initMatrix(std::vector<std::vector<T>> &m, int rows, int cols) {
+	std::vector<T> row(cols, T());
 	for (int i = 0; i < rows; i++) {
 		m.push_back(row);
 	}
 }
 
-void initMatrix(std::vector<std::vector<double>> &m, int size) {
+template <typename T>
+void initMatrix(std::vector<std::vector<T>> &m, int size) {
 	initMatrix(m, size, size);
 }
 
@@ -92,7 +100,7 @@ WordHMM concatSp(const WordHMM &model, const HMM &sp) {
 	initMatrix(result.tp, result.states.size() + 2);
 
 	int Ns = model.states.size();
-	float exitProb = model.tp[Ns][Ns + 1];
+	double exitProb = model.tp[Ns][Ns + 1];
 	copyMatrix(model.tp, 0, 0, Ns + 2, Ns + 2, result.tp, 0, 0);
 	copyMatrix(sp.tp, 0, 1, 2, 2, result.tp, Ns, Ns + 1);
 	result.tp[Ns][Ns + 1] *= exitProb;
@@ -122,7 +130,11 @@ FullHMM makeBigram(const std::vector<WordHMM> &models, std::map<std::string, std
 			result.tp[exit][enterStates[j]] = bigrams[model.name][model2.name];
 		}
 		result.tp[exit][Ns + 1] = bigrams[model.name]["<s>"];
-		result.wordStarts[enter - 1] = model.name;
+		WordInfo word;
+		word.enterState = enter - 1;
+		word.exitState = exit - 1;
+		word.word = model.name;
+		result.words.push_back(word);
 	}
 	return result;
 }
@@ -135,8 +147,11 @@ FullHMM prependSil(const FullHMM &model, const HMM &sil) {
 		result.states.push_back(state);
 
 	// shift word start index
-	for (auto pair : model.wordStarts)
-		result.wordStarts[pair.first + sil.states.size()] = pair.second;
+	for (auto word : model.words) {
+		word.enterState += sil.states.size();
+		word.exitState += sil.states.size();
+		result.words.push_back(word);
+	}
 
 	int Ns = result.states.size();
 	initMatrix(result.tp, Ns + 2);
@@ -216,11 +231,25 @@ FullHMM buildFullModel() {
 		}
 	}
 
-	return prependSil(makeBigram(words, bigrams), phones["sil"]);
+	auto model = prependSil(makeBigram(words, bigrams), phones["sil"]);
+
+	// pre-calculate log
+	for (auto &row : model.tp) {
+		for (auto &p : row) {
+			p = log(p);
+		}
+	}
+	for (auto &state : model.states) {
+		for (auto &pdf : state.pdf) {
+			pdf.weight = log(pdf.weight);
+		}
+	}
+
+	return model;
 }
 
 double getStateLogPdf(const GMM &pdf, const std::vector<double> &xs) {
-	double logp = log(pdf.weight);
+	double logp = pdf.weight;
 	for (int i = 0; i < N_DIMENSION; i++) {
 		//exp(-(x - mean[i]) ** 2 / (2 * var[i])) / sqrt(2 * pi * var[i])
 		logp += -pow(xs[i] - pdf.mean[i], 2) / (2.0 * pdf.var[i]) - log(2.0 * M_PI * pdf.var[i]) / 2.0;
@@ -268,12 +297,13 @@ std::vector<std::vector<double> > readObservation(std::string path) {
 std::vector<std::string> recognize(FullHMM &hmm, const std::vector<std::vector<double> > &obs) {
 	int Ns = hmm.states.size();
 	int T = obs.size();
-	std::vector<std::vector<double> > delta, psi;
-	initMatrix(delta, T, Ns);
+	std::vector<double> prevDelta(Ns);
+	std::vector<double> delta(Ns);
+	std::vector<std::vector<int> > psi;
 	initMatrix(psi, T, Ns);
 
 	for (int i = 0; i < Ns; i++) {
-		delta[0][i] = log(hmm.tp[0][1 + i]) + getStateLogPdf(hmm.states[i], obs[0]);
+		prevDelta[i] = hmm.tp[0][1 + i] + getStateLogPdf(hmm.states[i], obs[0]);
 	}
 
 	for (int t = 1; t < T; t++) {
@@ -281,15 +311,16 @@ std::vector<std::string> recognize(FullHMM &hmm, const std::vector<std::vector<d
 			double maxp = -std::numeric_limits<double>::infinity();
 			int maxi = 0;
 			for (int i = 0; i < Ns; i++) {
-				double p = delta[t - 1][i] + log(hmm.tp[1 + i][1 + j]);
+				double p = prevDelta[i] + hmm.tp[1 + i][1 + j];
 				if (p > maxp) {
 					maxp = p;
 					maxi = i;
 				}
 			}
-			delta[t][j] = maxp + getStateLogPdf(hmm.states[j], obs[t]);
+			delta[j] = maxp + getStateLogPdf(hmm.states[j], obs[t]);
 			psi[t][j] = maxi;
 		}
+		prevDelta = delta;
 	}
 
 	// backtracking
@@ -297,60 +328,77 @@ std::vector<std::string> recognize(FullHMM &hmm, const std::vector<std::vector<d
 	double maxp = -std::numeric_limits<double>::infinity();
 	int maxi = 0;
 	for (int i = 0; i < Ns; i++) {
-		double p = delta[T - 1][i];
+		double p = prevDelta[i];
 		if (p > maxp) {
 			maxp = p;
 			maxi = i;
 		}
 	}
 
-	std::vector<std::string> result;
-
+	std::vector<int> states;
 	int prev = maxi;
+	int wordLen = 0;
 	for (int t = T - 2; t >= 0; t--) {
 		int i = psi[t + 1][prev];
-		if (i != prev && i != prev - 1) {
-			auto word = hmm.wordStarts[prev];
-			if (word != "")
-				result.push_back(word);
-		}
+		states.push_back(i);
 		prev = i;
 	}
+	std::reverse(states.begin(), states.end());
 
-	std::reverse(result.begin(), result.end());
-
+	std::vector<std::string> result;
+	WordInfo word;
+	bool inWord = false;
+	for (auto s : states) {
+		if (!inWord) {
+			for (auto &w : hmm.words) {
+				if (s == w.enterState) {
+					word = w;
+					inWord = true;
+					break;
+				}
+			}
+		} else if (s == word.exitState) {
+			result.push_back(word.word);
+			inWord = false;
+		}
+	}
 	return result;
 }
 
 int main() {
 	FullHMM hmm = buildFullModel();
 
+	std::vector<std::string> filenames;
+	{
+		std::ifstream f("data/reference.txt");
+		std::string line;
+		std::getline(f, line); // #!MLF!#
+
+		while (!f.eof()) {
+			std::getline(f, line); // "filename.ext"
+			auto pos = line.rfind(".");
+			if (pos == std::string::npos)
+				continue;
+			std::string filename(line.substr(1, pos - 1));
+			filenames.push_back(filename);
+
+			while (line[0] != '.')
+				std::getline(f, line);
+		}
+	}
+
 	std::ofstream out("result.txt");
 	out << "#!MLF!#" << std::endl;
-
-	std::ifstream f("data/reference.txt");
-	std::string line;
-	std::getline(f, line); // #!MLF!#
-	while (!f.eof()) {
-		std::getline(f, line); // "filename.ext"
-		auto pos = line.rfind(".");
-		if (pos == std::string::npos)
-			continue;
-		std::string filename(line.substr(1, pos - 1));
-		std::cout << filename << std::endl;
-
-		out << '"' << filename << ".rec\"" << std::endl;
-
+	int i = 0;
+	for (auto filename : filenames) {
 		auto obs = readObservation(filename + ".txt");
 		auto result = recognize(hmm, obs);
-
+		std::cout << (++i) << '/' << filenames.size() << '\t' << filename << std::endl;
+		out << '"' << filename << ".rec\"" << std::endl;
 		for (auto word : result)
 			out << word << std::endl;
-
 		out << '.' << std::endl;
-
-		while (line[0] != '.')
-			std::getline(f, line);
 	}
+
 	return 0;
 }
