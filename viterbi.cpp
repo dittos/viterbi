@@ -8,12 +8,13 @@
 #include <cmath>
 
 #ifndef M_PI
-#define M_PI 3.14159265358979323846
+#define M_PI 3.14159265358979323846f
 #endif
 
 struct GMM {
-	double weight;
-	std::vector<double> mean, var;
+	float weight;
+	std::vector<float> mean, var;
+	float preSum;
 };
 
 struct HMMState {
@@ -21,7 +22,7 @@ struct HMMState {
 };
 
 struct HMM {
-	std::vector<std::vector<double>> tp;
+	std::vector<std::vector<float>> tp;
 	std::vector<HMMState> states;
 };
 
@@ -53,10 +54,10 @@ void initMatrix(std::vector<std::vector<T>> &m, int size) {
 }
 
 void copyMatrix(
-	const std::vector<std::vector<double>> &src,
+	const std::vector<std::vector<float>> &src,
 	int srcRow, int srcCol,
 	int rows, int cols,
-	std::vector<std::vector<double>> &dst,
+	std::vector<std::vector<float>> &dst,
 	int dstRow, int dstCol) {
 	for (int i = 0; i < rows; i++) {
 		for (int j = 0; j < cols; j++) {
@@ -65,7 +66,7 @@ void copyMatrix(
 	}
 }
 
-void printMatrix(const std::vector<std::vector<double>> &m) {
+void printMatrix(const std::vector<std::vector<float>> &m) {
 	std::cout << "size: " << m.size() << std::endl;
 	for (auto &row : m) {
 		for (auto col : row) {
@@ -100,14 +101,14 @@ WordHMM concatSp(const WordHMM &model, const HMM &sp) {
 	initMatrix(result.tp, result.states.size() + 2);
 
 	int Ns = model.states.size();
-	double exitProb = model.tp[Ns][Ns + 1];
+	float exitProb = model.tp[Ns][Ns + 1];
 	copyMatrix(model.tp, 0, 0, Ns + 2, Ns + 2, result.tp, 0, 0);
 	copyMatrix(sp.tp, 0, 1, 2, 2, result.tp, Ns, Ns + 1);
 	result.tp[Ns][Ns + 1] *= exitProb;
 	return result;
 }
 
-FullHMM makeBigram(const std::vector<WordHMM> &models, std::map<std::string, std::map<std::string, double> > &bigrams) {
+FullHMM makeBigram(const std::vector<WordHMM> &models, std::map<std::string, std::map<std::string, float> > &bigrams) {
 	FullHMM result;
 	std::vector<int> enterStates;
 	for (auto &model : models) {
@@ -159,7 +160,7 @@ FullHMM prependSil(const FullHMM &model, const HMM &sil) {
 	int s = model.states.size();
 	copyMatrix(model.tp, 0, 1, s + 2, s + 1, result.tp, N_STATE, N_STATE + 1);
 
-	double silExitProb = sil.tp[N_STATE][N_STATE + 1];
+	float silExitProb = sil.tp[N_STATE][N_STATE + 1];
 	for (int j = N_STATE + 1; j < Ns + 2; j++) {
 		result.tp[N_STATE][j] *= silExitProb;
 	}
@@ -217,7 +218,7 @@ FullHMM buildFullModel() {
 		}
 	}
 
-	std::map<std::string, std::map<std::string, double>> bigrams;
+	std::map<std::string, std::map<std::string, float>> bigrams;
 	{
 		std::ifstream f("data/bigram.txt");
 		while (!f.eof()) {
@@ -225,7 +226,7 @@ FullHMM buildFullModel() {
 			std::getline(f, line);
 			std::stringstream ss(line);
 			std::string first, second;
-			double prob;
+			float prob;
 			ss >> first >> second >> prob;
 			bigrams[first][second] = prob;
 		}
@@ -241,51 +242,55 @@ FullHMM buildFullModel() {
 	}
 	for (auto &state : model.states) {
 		for (auto &pdf : state.pdf) {
-			pdf.weight = log(pdf.weight);
+			float preSum = 0.0f;
+			for (int i = 0; i < N_DIMENSION; i++) {
+				preSum += log(2.0f * M_PI * pdf.var[i]);
+			}
+			pdf.preSum = log(pdf.weight) - preSum * 0.5f;
 		}
 	}
 
 	return model;
 }
 
-double getStateLogPdf(const GMM &pdf, const std::vector<double> &xs) {
-	double logp = pdf.weight;
+float getStateLogPdf(const GMM &pdf, const std::vector<float> &xs) {
+	float logp = 0.0;
 	for (int i = 0; i < N_DIMENSION; i++) {
 		//exp(-(x - mean[i]) ** 2 / (2 * var[i])) / sqrt(2 * pi * var[i])
-		logp += -pow(xs[i] - pdf.mean[i], 2) / (2.0 * pdf.var[i]) - log(2.0 * M_PI * pdf.var[i]) / 2.0;
+		logp += pow(xs[i] - pdf.mean[i], 2) / pdf.var[i];
 	}
-	return logp;
+	return pdf.preSum - logp * 0.5f;
 }
 
-double getStateLogPdf(const HMMState &state, const std::vector<double> &xs) {
+float getStateLogPdf(const HMMState &state, const std::vector<float> &xs) {
 	// log(e^100 + e^99)
 	// = log(e^(log e^100) + e^(log e^99))
 	// = log(e^(log e^100) * (e^(log e^100 - log e^100) + e^(log e^99 - log e^100))
 	// = log e^100 + log(1 + e^(log e^99 - log e^100))
-	std::vector<double> terms(N_PDF);
-	double maxTerm = -std::numeric_limits<double>::infinity();
+	std::vector<float> terms(N_PDF);
+	float maxTerm = -std::numeric_limits<float>::infinity();
 	for (int i = 0; i < N_PDF; i++) {
-		double term = getStateLogPdf(state.pdf[i], xs);
+		float term = getStateLogPdf(state.pdf[i], xs);
 		if (term > maxTerm)
 			maxTerm = term;
 		terms[i] = term;
 	}
-	double logTerm = 0.0;
+	float logTerm = 0.0;
 	for (int i = 0; i < N_PDF; i++) {
 		logTerm += exp(terms[i] - maxTerm);
 	}
 	return maxTerm + log(logTerm);
 }
 
-std::vector<std::vector<double> > readObservation(std::string path) {
-	std::vector<std::vector<double> > obs;
+std::vector<std::vector<float> > readObservation(std::string path) {
+	std::vector<std::vector<float> > obs;
 	std::ifstream f(path);
 	int rows, cols;
 	f >> rows >> cols;
 	for (int i = 0; i < rows; i++) {
-		std::vector<double> row;
+		std::vector<float> row;
 		for (int j = 0; j < cols; j++) {
-			double n;
+			float n;
 			f >> n;
 			row.push_back(n);
 		}
@@ -294,11 +299,11 @@ std::vector<std::vector<double> > readObservation(std::string path) {
 	return obs;
 }
 
-std::vector<std::string> recognize(FullHMM &hmm, const std::vector<std::vector<double> > &obs) {
+std::vector<std::string> recognize(const FullHMM &hmm, const std::vector<std::vector<float> > &obs) {
 	int Ns = hmm.states.size();
 	int T = obs.size();
-	std::vector<double> prevDelta(Ns);
-	std::vector<double> delta(Ns);
+	std::vector<float> prevDelta(Ns);
+	std::vector<float> delta(Ns);
 	std::vector<std::vector<int> > psi;
 	initMatrix(psi, T, Ns);
 
@@ -308,10 +313,10 @@ std::vector<std::string> recognize(FullHMM &hmm, const std::vector<std::vector<d
 
 	for (int t = 1; t < T; t++) {
 		for (int j = 0; j < Ns; j++) {
-			double maxp = -std::numeric_limits<double>::infinity();
+			float maxp = -std::numeric_limits<float>::infinity();
 			int maxi = 0;
 			for (int i = 0; i < Ns; i++) {
-				double p = prevDelta[i] + hmm.tp[1 + i][1 + j];
+				float p = prevDelta[i] + hmm.tp[1 + i][1 + j];
 				if (p > maxp) {
 					maxp = p;
 					maxi = i;
@@ -325,10 +330,10 @@ std::vector<std::string> recognize(FullHMM &hmm, const std::vector<std::vector<d
 
 	// backtracking
 
-	double maxp = -std::numeric_limits<double>::infinity();
+	float maxp = -std::numeric_limits<float>::infinity();
 	int maxi = 0;
 	for (int i = 0; i < Ns; i++) {
-		double p = prevDelta[i];
+		float p = prevDelta[i];
 		if (p > maxp) {
 			maxp = p;
 			maxi = i;
